@@ -315,6 +315,7 @@ typedef struct  LoongArchBT {
     /* loongarch eflags */
     uint32_t eflags;
     uint32_t ftop;
+    uint32_t tm;
 } lbt_t;
 
 typedef struct CPUArchState {

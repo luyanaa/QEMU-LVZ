@@ -151,6 +151,20 @@ DEF_HELPER_1(gtlbrd, void, env)
 DEF_HELPER_1(gtlbwr, void, env)
 DEF_HELPER_1(gtlbfill, void, env)
 DEF_HELPER_2(hvcl, void, env, i32)
+
+/* LoongArch binary translation (LBT), TCG */
+DEF_HELPER_FLAGS_5(lbt_x86_alu, TCG_CALL_NO_WG, void, env, i64, i64, i32, i32)
+DEF_HELPER_FLAGS_2(lbt_x86_mfflag, TCG_CALL_NO_WG, i64, env, i32)
+DEF_HELPER_FLAGS_3(lbt_x86_mtflag, TCG_CALL_NO_WG, void, env, i64, i32)
+DEF_HELPER_FLAGS_2(lbt_x86_setcc, TCG_CALL_NO_WG, i64, env, i32)
+DEF_HELPER_FLAGS_3(lbt_movgr2scr, TCG_CALL_NO_WG, void, env, i32, i64)
+DEF_HELPER_FLAGS_2(lbt_movscr2gr, TCG_CALL_NO_WG, i64, env, i32)
+DEF_HELPER_FLAGS_1(lbt_x86_mftop, TCG_CALL_NO_WG, i64, env)
+DEF_HELPER_FLAGS_2(lbt_x86_mttop, TCG_CALL_NO_WG, void, env, i32)
+DEF_HELPER_FLAGS_1(lbt_x86_inctop, TCG_CALL_NO_WG, void, env)
+DEF_HELPER_FLAGS_1(lbt_x86_dectop, TCG_CALL_NO_WG, void, env)
+DEF_HELPER_FLAGS_1(lbt_x86_settm, TCG_CALL_NO_WG, void, env)
+DEF_HELPER_FLAGS_1(lbt_x86_clrtm, TCG_CALL_NO_WG, void, env)
 DEF_HELPER_1(gspr, void, env)
 #endif
 

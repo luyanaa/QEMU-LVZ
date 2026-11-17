@@ -129,6 +129,7 @@ static const VMStateDescription vmstate_lbt = {
         VMSTATE_UINT64(env.lbt.scr3,   LoongArchCPU),
         VMSTATE_UINT32(env.lbt.eflags, LoongArchCPU),
         VMSTATE_UINT32(env.lbt.ftop,   LoongArchCPU),
+        VMSTATE_UINT32(env.lbt.tm,     LoongArchCPU),
         VMSTATE_END_OF_LIST()
     },
 };

@@ -617,6 +617,7 @@ static void loongarch_cpu_reset_hold(Object *obj, ResetType type)
     env->fcsr0_mask = FCSR0_M1 | FCSR0_M2 | FCSR0_M3;
 #endif
     env->fcsr0 = 0x0;
+    memset(&env->lbt, 0, sizeof(env->lbt));
 
     int n;
     /* Set csr registers value after reset, see the manual 6.4. */
@@ -815,7 +816,10 @@ void loongarch_cpu_post_init(Object *obj)
         object_property_set_description(obj, "lbt",
                                    "Set off to disable Binary Tranlation.");
     } else {
-        cpu->lbt = ON_OFF_AUTO_OFF;
+        /* TCG implements the LBT_X86 flag/state subset. */
+        cpu->lbt = ON_OFF_AUTO_ON;
+        cpu->env.cpucfg[2] = FIELD_DP32(cpu->env.cpucfg[2],
+                                        CPUCFG2, LBT_X86, 1);
     }
 }
 
