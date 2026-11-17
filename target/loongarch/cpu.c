@@ -117,6 +117,9 @@ static vaddr loongarch_cpu_get_pc(CPUState *cs)
 
 void trigger_vm_exit(CPULoongArchState *env)
 {
+    if (env->guest && !env->vm_exit) {
+        lbt_exit_guest(env);
+    }
     cpu_loongarch_set_guest_timer(env_archcpu(env), false);
     env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, PVM, 1);
     env->vm_exit = 1;
@@ -618,6 +621,8 @@ static void loongarch_cpu_reset_hold(Object *obj, ResetType type)
 #endif
     env->fcsr0 = 0x0;
     memset(&env->lbt, 0, sizeof(env->lbt));
+    memset(&env->lbt_host, 0, sizeof(env->lbt_host));
+    memset(&env->lbt_guest, 0, sizeof(env->lbt_guest));
 
     int n;
     /* Set csr registers value after reset, see the manual 6.4. */
@@ -796,6 +801,10 @@ static void loongarch_set_lbt(Object *obj, bool value, Error **errp)
     LoongArchCPU *cpu = LOONGARCH_CPU(obj);
 
     cpu->lbt = value ? ON_OFF_AUTO_ON : ON_OFF_AUTO_OFF;
+    if (!kvm_enabled()) {
+        cpu->env.cpucfg[2] = FIELD_DP32(cpu->env.cpucfg[2], CPUCFG2,
+                                        LBT_ALL, value ? 7 : 0);
+    }
 }
 
 void loongarch_cpu_post_init(Object *obj)
@@ -808,19 +817,18 @@ void loongarch_cpu_post_init(Object *obj)
                              loongarch_set_lasx);
     object_property_add_bool(obj, "lvz", loongarch_get_lvz,
                              loongarch_set_lvz);
-    /* lbt is enabled only in kvm mode, not supported in tcg mode */
     if (kvm_enabled()) {
         cpu->lbt = ON_OFF_AUTO_AUTO;
-        object_property_add_bool(obj, "lbt", loongarch_get_lbt,
-                                 loongarch_set_lbt);
-        object_property_set_description(obj, "lbt",
-                                   "Set off to disable Binary Tranlation.");
     } else {
-        /* TCG implements the LBT_X86 flag/state subset. */
+        /* TCG implements the LBT x86/ARM/MIPS groups. */
         cpu->lbt = ON_OFF_AUTO_ON;
         cpu->env.cpucfg[2] = FIELD_DP32(cpu->env.cpucfg[2],
-                                        CPUCFG2, LBT_X86, 1);
+                                        CPUCFG2, LBT_ALL, 7);
     }
+    object_property_add_bool(obj, "lbt", loongarch_get_lbt,
+                             loongarch_set_lbt);
+    object_property_set_description(obj, "lbt",
+                                    "Set off to disable Binary Translation.");
 }
 
 static void loongarch_cpu_init(Object *obj)

@@ -326,6 +326,8 @@ typedef struct CPUArchState {
     bool cf[8];
     uint32_t fcsr0;
     lbt_t  lbt;
+    lbt_t  lbt_host;   /* host context while running guest */
+    lbt_t  lbt_guest;  /* guest context while running host */
 
     uint32_t cpucfg[21];
 
@@ -479,6 +481,20 @@ typedef struct CPUArchState {
     struct loongarch_boot_info *boot_info;
 #endif
 } CPULoongArchState;
+
+static inline void lbt_enter_guest(CPULoongArchState *env)
+{
+    env->lbt_host = env->lbt;
+    env->lbt = env->lbt_guest;
+}
+
+static inline void lbt_exit_guest(CPULoongArchState *env)
+{
+    env->lbt_guest = env->lbt;
+    env->lbt = env->lbt_host;
+}
+
+
 
 /**
  * LoongArchCPU:

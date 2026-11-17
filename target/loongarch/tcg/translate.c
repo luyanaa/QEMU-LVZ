@@ -293,7 +293,7 @@ static void loongarch_tr_translate_insn(DisasContextBase *dcbase, CPUState *cs)
 
     ctx->opcode = translator_ldl(cpu_env(cs), &ctx->base, ctx->base.pc_next);
 
-    if (!decode(ctx, ctx->opcode)) {
+    if (!lbt_predecode(ctx, ctx->opcode) && !decode(ctx, ctx->opcode)) {
         qemu_log_mask(LOG_UNIMP, "Error: unknown opcode. "
                       TARGET_FMT_lx ": 0x%x\n",
                       ctx->base.pc_next, ctx->opcode);

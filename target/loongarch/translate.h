@@ -26,6 +26,10 @@
 #define avail_LASX(C)  (FIELD_EX32((C)->cpucfg2, CPUCFG2, LASX))
 #define avail_IOCSR(C) (FIELD_EX32((C)->cpucfg1, CPUCFG1, IOCSR))
 #define avail_LVZ(C)   (FIELD_EX32((C)->cpucfg2, CPUCFG2, LVZ))
+#define avail_LBT_X86(C)  (FIELD_EX32((C)->cpucfg2, CPUCFG2, LBT_X86))
+#define avail_LBT_ARM(C)  (FIELD_EX32((C)->cpucfg2, CPUCFG2, LBT_ARM))
+#define avail_LBT_MIPS(C) (FIELD_EX32((C)->cpucfg2, CPUCFG2, LBT_MIPS))
+#define avail_LBT_ANY(C) (avail_LBT_X86(C) || avail_LBT_ARM(C) || avail_LBT_MIPS(C))
 
 /*
  * If an operation is being performed on less than TARGET_LONG_BITS,

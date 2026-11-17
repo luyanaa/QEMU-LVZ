@@ -61,6 +61,21 @@
 &lbt_j_ui4    rj imm
 &lbt_j_ui5    rj imm
 &lbt_j_ui6    rj imm
+&lbt_arm_rr   rj rk cond
+&lbt_arm_imm  rj imm cond
+&lbt_arm_j    rj cond
+&lbt_arm_move rd rj cond
+&lbt_rd_rj    rd rj
+&lbt_rd_rj_rk rd rj rk
+&lbt_rd_rj_imm rd rj imm
+&lbt_fd_fj      fd fj
+&lbt_fd_fj_fk   fd fj fk
+&lbt_settag     rd imm1 imm2
+&lbt_ui3        imm
+&lbt_rd         rd
+&lbt_rd_rj_simm12 rd rj imm
+&lbt_imm imm
+&lbt_rd_rj_imm4 rd rj imm
 
 #
 # Formats
@@ -119,6 +134,21 @@
 @lbt_j_ui4 .................. imm:4 rj:5 ..... &lbt_j_ui4
 @lbt_j_ui5 ................. imm:5 rj:5 ..... &lbt_j_ui5
 @lbt_j_ui6 ................ imm:6 rj:5 ..... &lbt_j_ui6
+@lbt_arm_rr ................. rk:5 rj:5 . cond:4 &lbt_arm_rr
+@lbt_arm_imm ................. imm:5 rj:5 . cond:4 &lbt_arm_imm
+@lbt_arm_j .................. cond:4 rj:5 ..... &lbt_arm_j
+@lbt_arm_move .................. cond:4 rj:5 rd:5 &lbt_arm_move
+@lbt_rd_rj ...................... rj:5 rd:5 &lbt_rd_rj
+@lbt_rd_rj_rk ................. rk:5 rj:5 rd:5 &lbt_rd_rj_rk
+@lbt_rd_rj_imm ................. imm:5 rj:5 rd:5 &lbt_rd_rj_imm
+@lbt_fd_fj ...................... fj:5 fd:5 &lbt_fd_fj
+@lbt_fd_fj_fk ................. fk:5 fj:5 fd:5 &lbt_fd_fj_fk
+@lbt_settag .............. imm2:8 imm1:5 rd:5 &lbt_settag
+@lbt_ui3 ........................ imm:3 ..... &lbt_ui3
+@lbt_rd ........................... rd:5 &lbt_rd
+@lbt_rd_rj_simm12 .......... imm:12 rj:5 rd:5 &lbt_rd_rj_simm12
+@lbt_jiscr ...... imm:16 .......... &lbt_imm
+@lbt_rd_rj_imm4 .................. imm:4 rj:5 rd:5 &lbt_rd_rj_imm4
 
 #
 # Fixed point arithmetic operation instruction
@@ -2228,3 +2258,71 @@ lbt_x86rotli_d 0000000001010101...........10111 @lbt_j_ui6
 lbt_x86rotri_d 0000000001010101...........01111 @lbt_j_ui6
 lbt_x86rcli_d 0000000001010101...........11011 @lbt_j_ui6
 lbt_x86rcri_d 0000000001010101...........10011 @lbt_j_ui6
+
+lbt_armadd_w         00000000001101110..........1....    @lbt_arm_rr
+lbt_armsub_w         00000000001101111..........1....    @lbt_arm_rr
+lbt_armadc_w         00000000001110000..........1....    @lbt_arm_rr
+lbt_armsbc_w         00000000001110001..........1....    @lbt_arm_rr
+lbt_armand_w         00000000001110010..........1....    @lbt_arm_rr
+lbt_armor_w          00000000001110011..........1....    @lbt_arm_rr
+lbt_armxor_w         00000000001110100..........1....    @lbt_arm_rr
+lbt_armsll_w         00000000001110101..........1....    @lbt_arm_rr
+lbt_armsrl_w         00000000001110110..........1....    @lbt_arm_rr
+lbt_armsra_w         00000000001110111..........1....    @lbt_arm_rr
+lbt_armrotr_w        00000000001111000..........1....    @lbt_arm_rr
+lbt_armslli_w        00000000001111001..........1....    @lbt_arm_imm
+lbt_armsrli_w        00000000001111010..........1....    @lbt_arm_imm
+lbt_armsrai_w        00000000001111011..........1....    @lbt_arm_imm
+lbt_armrotri_w       00000000001111100..........1....    @lbt_arm_imm
+lbt_armnot_w         000000000011111111.........11100    @lbt_arm_j
+lbt_armmov_w         000000000011111111.........11101    @lbt_arm_j
+lbt_armmov_d         000000000011111111.........11110    @lbt_arm_j
+lbt_armrrx_w         000000000011111111.........11111    @lbt_arm_j
+lbt_armmove          000000000011011001..............    @lbt_arm_move
+lbt_armsetj          000000000011011011....00000.....    @lbt_rd_cond
+lbt_armmfflag        00000000010111........00010.....    @lbt_rd_imm8
+lbt_armmtflag        00000000010111........00011.....    @lbt_rd_imm8
+lbt_x86mul_b         00000000001111101..........00000    @rr_jk
+lbt_x86mul_h         00000000001111101..........00001    @rr_jk
+lbt_x86mul_w         00000000001111101..........00010    @rr_jk
+lbt_x86mul_d         00000000001111101..........00011    @rr_jk
+lbt_x86mul_bu        00000000001111101..........00100    @rr_jk
+lbt_x86mul_hu        00000000001111101..........00101    @rr_jk
+lbt_x86mul_wu        00000000001111101..........00110    @rr_jk
+lbt_x86mul_du        00000000001111101..........00111    @rr_jk
+lbt_setx86loope      0000000000000000011110..........    @lbt_rd_rj
+lbt_setx86loopne     0000000000000000011111..........    @lbt_rd_rj
+lbt_addu12i_w        00000000001010010...............    @lbt_rd_rj_imm
+lbt_addu12i_d        00000000001010011...............    @lbt_rd_rj_imm
+lbt_adc_b            00000000001100000...............    @lbt_rd_rj_rk
+lbt_adc_h            00000000001100001...............    @lbt_rd_rj_rk
+lbt_adc_w            00000000001100010...............    @lbt_rd_rj_rk
+lbt_adc_d            00000000001100011...............    @lbt_rd_rj_rk
+lbt_sbc_b            00000000001100100...............    @lbt_rd_rj_rk
+lbt_sbc_h            00000000001100101...............    @lbt_rd_rj_rk
+lbt_sbc_w            00000000001100110...............    @lbt_rd_rj_rk
+lbt_sbc_d            00000000001100111...............    @lbt_rd_rj_rk
+lbt_rcr_b            00000000001101000...............    @lbt_rd_rj_rk
+lbt_rcr_h            00000000001101001...............    @lbt_rd_rj_rk
+lbt_rcr_w            00000000001101010...............    @lbt_rd_rj_rk
+lbt_rcr_d            00000000001101011...............    @lbt_rd_rj_rk
+
+lbt_x86mftop         000000000000000001110100000.....    @lbt_rd
+lbt_x86mttop         000000000000000001110000...00000    @lbt_ui3
+lbt_x86settag        00000000010110..................    @lbt_settag
+lbt_fcvt_ld_d        0000000100010100111000..........    @lbt_fd_fj
+lbt_fcvt_ud_d        0000000100010100111001..........    @lbt_fd_fj
+lbt_fcvt_d_ld        00000001000101010...............    @lbt_fd_fj_fk
+lbt_ldl_w            0010111000......................    @lbt_rd_rj_simm12
+lbt_ldr_w            0010111001......................    @lbt_rd_rj_simm12
+lbt_ldl_d            0010111010......................    @lbt_rd_rj_simm12
+lbt_ldr_d            0010111011......................    @lbt_rd_rj_simm12
+lbt_stl_w            0010111100......................    @lbt_rd_rj_simm12
+lbt_str_w            0010111101......................    @lbt_rd_rj_simm12
+lbt_stl_d            0010111110......................    @lbt_rd_rj_simm12
+lbt_str_d            0010111111......................    @lbt_rd_rj_simm12
+lbt_jiscr0 010010................1000000000 @lbt_jiscr
+lbt_jiscr1 010010................1100000000 @lbt_jiscr
+lbt_rotr_b 00000000000110100............... @lbt_rd_rj_rk
+lbt_rotr_h 00000000000110101............... @lbt_rd_rj_rk
+lbt_rotri_b 000000000100110000.............. @lbt_rd_rj_imm4

@@ -134,6 +134,7 @@ void helper_ertn(CPULoongArchState *env)
 
     env->lladdr = 1;
     if (will_return_to_guest(env)) {
+        lbt_enter_guest(env);
         env->guest = true;
         env->CSR_GSTAT = FIELD_DP64(env->CSR_GSTAT, CSR_GSTAT, VM, 1);
         cpu_loongarch_set_guest_timer(env_archcpu(env), true);
@@ -493,3 +494,425 @@ void helper_lbt_x86_clrtm(CPULoongArchState *env)
     env->lbt.tm = 0;
 }
 
+
+/* ---------------- LBT: ARM flags and arithmetic ---------------- */
+enum {
+    ARM_OP_ADD, ARM_OP_ADC, ARM_OP_SUB, ARM_OP_SBC,
+    ARM_OP_AND, ARM_OP_OR, ARM_OP_XOR, ARM_OP_NOT,
+    ARM_OP_SHL, ARM_OP_SHR, ARM_OP_SAR, ARM_OP_ROR, ARM_OP_RRX,
+    ARM_OP_MOVW, ARM_OP_MOVD,
+};
+
+static int lbt_arm_cond_holds(uint32_t e, uint32_t cond)
+{
+    int n = !!(e & LBT_SF);
+    int z = !!(e & LBT_ZF);
+    int c = !!(e & LBT_CF);
+    int v = !!(e & LBT_OF);
+
+    switch (cond & 15) {
+    case 0:  return z;
+    case 1:  return !z;
+    case 2:  return c;
+    case 3:  return !c;
+    case 4:  return n;
+    case 5:  return !n;
+    case 6:  return v;
+    case 7:  return !v;
+    case 8:  return c && !z;
+    case 9:  return !c || z;
+    case 10: return n == v;
+    case 11: return n != v;
+    case 12: return !z && n == v;
+    case 13: return z || n != v;
+    default: return 1;
+    }
+}
+
+uint64_t helper_lbt_arm_cond(CPULoongArchState *env, uint32_t cond)
+{
+    return lbt_arm_cond_holds(env->lbt.eflags, cond) ? 1 : 0;
+}
+
+void helper_lbt_arm_alu(CPULoongArchState *env, uint64_t a, uint64_t b,
+                        uint32_t op, uint32_t cond)
+{
+    uint32_t e = env->lbt.eflags;
+    uint32_t r, lhs, rhs, cnt;
+    uint64_t wide;
+    int n = 0, z = 0, c = 0, v = 0;
+    int set_c = 0, set_v = 0;
+
+    if (!lbt_arm_cond_holds(e, cond)) {
+        return;
+    }
+
+    lhs = (uint32_t)a;
+    rhs = (uint32_t)b;
+
+    switch (op) {
+    case ARM_OP_ADD:
+    case ARM_OP_ADC:
+        wide = (uint64_t)lhs + rhs + ((op == ARM_OP_ADC) ? !!(e & LBT_CF) : 0);
+        r = (uint32_t)wide;
+        c = (wide >> 32) & 1;
+        v = ((~(lhs ^ rhs)) & (lhs ^ r) & 0x80000000u) != 0;
+        n = (r >> 31) & 1;
+        z = r == 0;
+        set_c = set_v = 1;
+        break;
+    case ARM_OP_SUB:
+    case ARM_OP_SBC: {
+        uint32_t borrow = (op == ARM_OP_SBC) ? ((e & LBT_CF) ? 0 : 1) : 0;
+        uint64_t sub = (uint64_t)rhs + borrow;
+        r = (uint32_t)(lhs - sub);
+        c = lhs < sub;
+        v = ((lhs ^ (uint32_t)sub) & (lhs ^ r) & 0x80000000u) != 0;
+        n = (r >> 31) & 1;
+        z = r == 0;
+        set_c = set_v = 1;
+        break;
+    }
+    case ARM_OP_AND:
+        r = lhs & rhs; n = (r >> 31) & 1; z = r == 0; break;
+    case ARM_OP_OR:
+        r = lhs | rhs; n = (r >> 31) & 1; z = r == 0; break;
+    case ARM_OP_XOR:
+        r = lhs ^ rhs; n = (r >> 31) & 1; z = r == 0; break;
+    case ARM_OP_NOT:
+        r = ~lhs; n = (r >> 31) & 1; z = r == 0; break;
+    case ARM_OP_SHL:
+        cnt = rhs & 0xff;
+        if (cnt == 0) { r = lhs; }
+        else if (cnt < 32) { c = (lhs >> (32 - cnt)) & 1; r = lhs << cnt; }
+        else if (cnt == 32) { c = lhs & 1; r = 0; }
+        else { c = 0; r = 0; }
+        n = (r >> 31) & 1; z = r == 0; set_c = 1; break;
+    case ARM_OP_SHR:
+        cnt = rhs & 0xff;
+        if (cnt == 0) { r = lhs; }
+        else if (cnt < 32) { r = lhs >> cnt; c = (lhs >> (cnt - 1)) & 1; }
+        else if (cnt == 32) { r = 0; c = (lhs >> 31) & 1; }
+        else { r = 0; c = 0; }
+        n = (r >> 31) & 1; z = r == 0; set_c = 1; break;
+    case ARM_OP_SAR:
+        cnt = rhs & 0xff;
+        if (cnt == 0) { r = lhs; }
+        else if (cnt < 32) { r = (uint32_t)((int32_t)lhs >> cnt); c = (lhs >> (cnt - 1)) & 1; }
+        else { c = (lhs >> 31) & 1; r = c ? 0xffffffffu : 0; }
+        n = (r >> 31) & 1; z = r == 0; set_c = 1; break;
+    case ARM_OP_ROR: {
+        uint32_t raw = rhs & 0xff;
+        cnt = rhs & 0x1f;
+        r = cnt == 0 ? lhs : ((lhs >> cnt) | (lhs << (32 - cnt)));
+        if (raw != 0) {
+            c = cnt == 0 ? ((lhs >> 31) & 1) : ((lhs >> (cnt - 1)) & 1);
+        }
+        n = (r >> 31) & 1; z = r == 0; set_c = 1;
+        break;
+    }
+    case ARM_OP_RRX:
+        r = (lhs >> 1) | ((e & LBT_CF) ? 0x80000000u : 0);
+        c = lhs & 1;
+        n = (r >> 31) & 1; z = r == 0; set_c = 1; break;
+    case ARM_OP_MOVW:
+        r = lhs; n = (r >> 31) & 1; z = r == 0; break;
+    case ARM_OP_MOVD: {
+        uint64_t r64 = a;
+        uint32_t ne = env->lbt.eflags & ~(LBT_SF | LBT_ZF);
+        if (r64 & (1ULL << 63)) ne |= LBT_SF;
+        if (r64 == 0) ne |= LBT_ZF;
+        env->lbt.eflags = ne;
+        return;
+    }
+    default:
+        return;
+    }
+
+    e &= ~(LBT_SF | LBT_ZF);
+    if (n) e |= LBT_SF;
+    if (z) e |= LBT_ZF;
+    if (set_c) { e &= ~LBT_CF; if (c) e |= LBT_CF; }
+    if (set_v) { e &= ~LBT_OF; if (v) e |= LBT_OF; }
+    env->lbt.eflags = e;
+}
+
+uint64_t helper_lbt_arm_move(CPULoongArchState *env, uint64_t src,
+                             uint64_t dst, uint32_t cond)
+{
+    return lbt_arm_cond_holds(env->lbt.eflags, cond) ? src : dst;
+}
+
+uint64_t helper_lbt_arm_mfflag(CPULoongArchState *env, uint32_t mask)
+{
+    uint32_t e = env->lbt.eflags;
+    uint32_t out = 0;
+
+    if (mask & (1 << 4)) out |= ((e & LBT_SF) ? 1u : 0u) << 31;
+    if (mask & (1 << 3)) out |= ((e & LBT_ZF) ? 1u : 0u) << 30;
+    if (mask & (1 << 0)) out |= ((e & LBT_CF) ? 1u : 0u) << 29;
+    if (mask & (1 << 5)) out |= ((e & LBT_OF) ? 1u : 0u) << 28;
+    return (uint64_t)(int64_t)(int32_t)out;
+}
+
+void helper_lbt_arm_mtflag(CPULoongArchState *env, uint64_t val, uint32_t mask)
+{
+    uint32_t e = env->lbt.eflags;
+
+    if (mask & (1 << 4)) { e &= ~LBT_SF; if ((val >> 31) & 1) e |= LBT_SF; }
+    if (mask & (1 << 3)) { e &= ~LBT_ZF; if ((val >> 30) & 1) e |= LBT_ZF; }
+    if (mask & (1 << 0)) { e &= ~LBT_CF; if ((val >> 29) & 1) e |= LBT_CF; }
+    if (mask & (1 << 5)) { e &= ~LBT_OF; if ((val >> 28) & 1) e |= LBT_OF; }
+    env->lbt.eflags = e;
+}
+
+void helper_lbt_x86_mul(CPULoongArchState *env, uint64_t a, uint64_t b,
+                        uint32_t size, uint32_t is_signed)
+{
+    __int128 product;
+    int overflow;
+    uint64_t mask = lbt_mask(size);
+    uint64_t sign = 1ULL << (size * 8 - 1);
+
+    if (is_signed) {
+        int64_t sa = (int64_t)(a << (64 - size * 8)) >> (64 - size * 8);
+        int64_t sb = (int64_t)(b << (64 - size * 8)) >> (64 - size * 8);
+        product = (__int128)sa * sb;
+        overflow = product < -((__int128)1 << (size * 8 - 1)) ||
+                   product > (((__int128)1 << (size * 8 - 1)) - 1);
+    } else {
+        unsigned __int128 p = (unsigned __int128)(a & mask) * (b & mask);
+        product = (__int128)p;
+        overflow = (p >> (size * 8)) != 0;
+    }
+    (void)sign;
+    env->lbt.eflags &= ~(LBT_CF | LBT_OF | LBT_SF | LBT_ZF | LBT_AF | LBT_PF);
+    if (overflow) {
+        env->lbt.eflags |= LBT_CF | LBT_OF;
+    }
+}
+
+uint64_t helper_lbt_x86_setloop(CPULoongArchState *env, uint64_t counter,
+                                uint32_t loopne)
+{
+    uint32_t e = env->lbt.eflags;
+    int zf = !!(e & LBT_ZF);
+    return (counter != 0 && (loopne ? !zf : zf)) ? 1 : 0;
+}
+
+uint64_t helper_lbt_int_adc(CPULoongArchState *env, uint64_t a, uint64_t b,
+                            uint32_t size, uint32_t sub)
+{
+    uint64_t mask = lbt_mask(size);
+    uint32_t cf = !!(env->lbt.eflags & LBT_CF);
+    uint64_t r;
+    int sign;
+
+    if (sub) {
+        r = (a - b - cf) & mask;
+    } else {
+        r = (a + b + cf) & mask;
+    }
+    sign = (r >> (size * 8 - 1)) & 1;
+    if (sign) {
+        r |= ~mask;
+    }
+    return r;
+}
+
+uint64_t helper_lbt_int_rotr(CPULoongArchState *env, uint64_t a, uint64_t b,
+                             uint32_t size)
+{
+    unsigned bits = size * 8;
+    uint64_t mask = lbt_mask(size);
+    unsigned c = b & (bits - 1);
+    uint64_t v = a & mask;
+
+    return ((v >> c) | (v << ((bits - c) & (bits - 1)))) & mask;
+}
+
+uint64_t helper_lbt_int_rcr(CPULoongArchState *env, uint64_t a, uint64_t b,
+                            uint32_t size)
+{
+    unsigned bits = size * 8;
+    uint64_t mask = lbt_mask(size);
+    unsigned c = b % (bits + 1);
+    uint64_t v = a & mask;
+    unsigned cf = !!(env->lbt.eflags & LBT_CF);
+
+    for (unsigned i = 0; i < c; i++) {
+        unsigned newcf = v & 1;
+        v = (v >> 1) | ((uint64_t)cf << (bits - 1));
+        cf = newcf;
+    }
+    return v & mask;
+}
+
+uint64_t helper_lbt_fcvt_ld_d(CPULoongArchState *env, uint64_t d)
+{
+    unsigned exp_d = (d >> 52) & 0x7ff;
+    uint64_t man_d = d & 0x000fffffffffffffULL;
+    unsigned j_bit;
+    uint64_t man_x87;
+
+    if (exp_d == 0 && man_d == 0) {
+        j_bit = 0;
+        man_x87 = 0;
+    } else if (exp_d == 0) {
+        int p = 63 - __builtin_clzll(man_d);
+        j_bit = 1;
+        man_x87 = (man_d << (63 - p)) & 0x7fffffffffffffffULL;
+    } else if (exp_d == 0x7ff && man_d == 0) {
+        j_bit = 1;
+        man_x87 = 0;
+    } else if (exp_d == 0x7ff) {
+        j_bit = 1;
+        man_x87 = (man_d << 11) | (1ULL << 62);
+    } else {
+        j_bit = 1;
+        man_x87 = man_d << 11;
+    }
+    return ((uint64_t)j_bit << 63) | man_x87;
+}
+
+uint64_t helper_lbt_fcvt_ud_d(CPULoongArchState *env, uint64_t d)
+{
+    unsigned sign = (d >> 63) & 1;
+    unsigned exp_d = (d >> 52) & 0x7ff;
+    uint64_t man_d = d & 0x000fffffffffffffULL;
+    int64_t exp_x87;
+
+    if (exp_d == 0x7ff) {
+        exp_x87 = 0x7fff;
+    } else if (exp_d == 0 && man_d == 0) {
+        exp_x87 = 0;
+    } else if (exp_d == 0) {
+        int p = 63 - __builtin_clzll(man_d);
+        exp_x87 = -1074 + p + 16383;
+    } else {
+        exp_x87 = (int64_t)exp_d - 1023 + 16383;
+    }
+    return ((uint64_t)sign << 15) | ((uint64_t)exp_x87 & 0x7fff);
+}
+
+uint64_t helper_lbt_fcvt_d_ld(CPULoongArchState *env, uint64_t lo, uint64_t hi)
+{
+    unsigned sign = (hi >> 15) & 1;
+    int64_t exp_x87 = hi & 0x7fff;
+    unsigned j_bit = (lo >> 63) & 1;
+    uint64_t man_x87 = lo & 0x7fffffffffffffffULL;
+    uint64_t full = ((uint64_t)j_bit << 63) | man_x87;
+    unsigned exp_d;
+    uint64_t man_d;
+
+    if (exp_x87 == 0x7fff && j_bit) {
+        man_d = man_x87 >> 11;
+        man_d |= (1ULL << 51);
+        exp_d = 0x7ff;
+    } else if (exp_x87 == 0) {
+        exp_d = 0;
+        man_d = full >> 11;
+    } else {
+        exp_d = exp_x87 - 16383 + 1023;
+        man_d = (full >> 11) & 0x000fffffffffffffULL;
+    }
+    return ((uint64_t)sign << 63) | ((uint64_t)exp_d << 52) | man_d;
+}
+
+uint64_t helper_lbt_x86_settag(CPULoongArchState *env, uint64_t tag,
+                               uint32_t imm1, uint32_t imm2)
+{
+    unsigned op = imm1 & 7;
+    unsigned bit = imm2 & 15;
+
+    if (op == 0) {
+        tag |= 1ULL << bit;
+    } else if (op == 1) {
+        tag &= ~(1ULL << bit);
+    } else {
+        tag ^= 1ULL << bit;
+    }
+    return tag;
+}
+
+uint64_t helper_lbt_jiscr(CPULoongArchState *env, uint32_t imm,
+                          uint32_t save_pc, uint64_t pc)
+{
+    uint64_t target = env->lbt.scr0 + (int64_t)(int32_t)imm * 4;
+
+    if (save_pc) {
+        env->lbt.scr0 = pc;
+    }
+    return target;
+}
+
+static inline uint64_t lbt_mips_lmask(uint64_t addr, unsigned size)
+{
+    unsigned mask = size - 1;
+    return (addr & mask) ^ mask;
+}
+
+uint64_t helper_lbt_mips_ldl(CPULoongArchState *env, uint64_t addr,
+                             uint64_t old, uint32_t size, uint32_t mem_idx)
+{
+    unsigned sizem1 = size - 1;
+    unsigned shift = ((addr & sizem1) ^ sizem1) * 8;
+    uint64_t a = addr & ~(uint64_t)sizem1;
+    uint64_t mem;
+
+    cpu_ldub_mmuidx_ra(env, addr, mem_idx, GETPC());
+    mem = size == 4 ? cpu_ldl_le_mmuidx_ra(env, a, mem_idx, GETPC())
+                    : cpu_ldq_le_mmuidx_ra(env, a, mem_idx, GETPC());
+    return (mem << shift) | (old & ~(~0ULL << shift));
+}
+
+uint64_t helper_lbt_mips_ldr(CPULoongArchState *env, uint64_t addr,
+                             uint64_t old, uint32_t size, uint32_t mem_idx)
+{
+    unsigned sizem1 = size - 1;
+    unsigned shift = (addr & sizem1) * 8;
+    uint64_t a = addr & ~(uint64_t)sizem1;
+    uint64_t mem;
+
+    cpu_ldub_mmuidx_ra(env, addr, mem_idx, GETPC());
+    mem = size == 4 ? cpu_ldl_le_mmuidx_ra(env, a, mem_idx, GETPC())
+                    : cpu_ldq_le_mmuidx_ra(env, a, mem_idx, GETPC());
+    mem >>= shift;
+    return mem | (old & (~1ULL << (size * 8 - 1 - shift)));
+}
+
+void helper_lbt_mips_stl(CPULoongArchState *env, uint64_t val, uint64_t addr,
+                         uint32_t size, uint32_t mem_idx)
+{
+    unsigned sizem1 = size - 1;
+    uint64_t lmask = lbt_mips_lmask(addr, size);
+    int dir = -1;
+    uint64_t v = val;
+
+    cpu_stb_mmuidx_ra(env, addr, (uint8_t)(v >> (size * 8 - 8)), mem_idx, GETPC());
+    for (unsigned i = 1; i < size; i++) {
+        if (lmask <= sizem1 - i) {
+            cpu_stb_mmuidx_ra(env, addr + dir * (int)i,
+                              (uint8_t)(v >> (size * 8 - 8 - 8 * i)),
+                              mem_idx, GETPC());
+        }
+    }
+}
+
+void helper_lbt_mips_str(CPULoongArchState *env, uint64_t val, uint64_t addr,
+                         uint32_t size, uint32_t mem_idx)
+{
+    unsigned sizem1 = size - 1;
+    uint64_t lmask = lbt_mips_lmask(addr, size);
+    int dir = -1;
+    uint64_t v = val;
+
+    cpu_stb_mmuidx_ra(env, addr, (uint8_t)v, mem_idx, GETPC());
+    for (unsigned i = 1; i < size; i++) {
+        if (lmask >= i) {
+            cpu_stb_mmuidx_ra(env, addr - dir * (int)i,
+                              (uint8_t)(v >> (8 * i)),
+                              mem_idx, GETPC());
+        }
+    }
+}
