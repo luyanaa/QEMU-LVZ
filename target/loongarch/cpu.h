@@ -667,6 +667,33 @@ static inline uint8_t get_tgid(CPULoongArchState *env)
     return 0;
 }
 
+/*
+ * GID that tags the entries of a TLB bank.  This is a property of the bank
+ * being addressed, not of the mode currently executing:
+ *
+ *   guest bank: entries always belong to CSR.GSTAT.GID, so a gtlbwr/gtlbfill
+ *               performed by the host (which is how QEMU fills guest entries)
+ *               must not be tagged with the host's GID (which is 0).
+ *   host  bank: entries are stage-2 mappings, tagged with GTLBC.TGID when the
+ *               host selected a target guest, otherwise with the GID of the
+ *               guest they were filled for.
+ */
+static inline uint8_t get_bank_gid(CPULoongArchState *env, bool guest)
+{
+    if (guest) {
+        /*
+         * GTLBC.USETGID lets the host name the guest whose bank it is about to
+         * touch (that is how KVM switches guests); a guest instruction always
+         * targets its own GID.
+         */
+        if (!env->guest && FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, USETGID)) {
+            return FIELD_EX64(env->CSR_GTLBC, CSR_GTLBC, TGID);
+        }
+        return get_gid(env);
+    }
+    return get_tgid(env);
+}
+
 void trigger_vm_exit(CPULoongArchState *env);
 
 void loongarch_cpu_post_init(Object *obj);

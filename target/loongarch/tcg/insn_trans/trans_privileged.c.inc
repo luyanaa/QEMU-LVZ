@@ -563,52 +563,15 @@ static bool trans_invtlb(DisasContext *ctx, arg_invtlb *a)
     }
 
     switch (a->imm) {
-    case 0x0:
-    case 0x1:
-        gen_helper_invtlb_all(tcg_env, rj, tcg_constant_i32(a->imm), tcg_constant_i32(0));
+    case 0x0 ... 0x6:
+    case 0x9 ... 0x16:
+        /*
+         * The helper decodes the opcode itself: it owns the bank selection,
+         * the GID source and the per-op predicates, all of which differ
+         * between the base (0x0-0x6) and LVZ (0x9-0x16) forms.
+         */
+        gen_helper_invtlb(tcg_env, rj, rk, tcg_constant_i32(a->imm));
         break;
-    case 0x2:
-        gen_helper_invtlb_all_g(tcg_env, rj, tcg_constant_i32(1), tcg_constant_i32(0));
-        break;
-    case 0x3:
-        gen_helper_invtlb_all_g(tcg_env, rj, tcg_constant_i32(0), tcg_constant_i32(0));
-        break;
-    case 0x4:
-        gen_helper_invtlb_all_asid(tcg_env, rj, tcg_constant_i32(0));
-        break;
-    case 0x5:
-        gen_helper_invtlb_page_asid(tcg_env, rj, rk, tcg_constant_i32(0));
-        break;
-    case 0x6:
-        gen_helper_invtlb_page_asid_or_g(tcg_env, rj, rk, tcg_constant_i32(0));
-        break;
-    case 0x9:
-    case 0x10:
-    case 0x11:
-    case 0x12:
-    case 0x13:
-    case 0x14:
-    case 0x15:
-    case 0x16:
-        //TODO: reify invalidate scope for these cases
-        gen_helper_invtlb_all(tcg_env, rj, tcg_constant_i32(1), tcg_constant_i32(1));
-        break;
-    case 0xA:
-        gen_helper_invtlb_all_g(tcg_env, rj, tcg_constant_i32(1), tcg_constant_i32(1));
-        break;
-    case 0xB:
-        gen_helper_invtlb_all_g(tcg_env, rj, tcg_constant_i32(0), tcg_constant_i32(1));
-        break;
-    case 0xC:
-        gen_helper_invtlb_all_asid(tcg_env, rj, tcg_constant_i32(1));
-        break;
-    case 0xD:
-        gen_helper_invtlb_page_asid(tcg_env, rj, rk, tcg_constant_i32(1));
-        break;
-    case 0xE:
-        gen_helper_invtlb_page_asid_or_g(tcg_env, rj, rk, tcg_constant_i32(1));
-        break;
-
     default:
         return false;
     }

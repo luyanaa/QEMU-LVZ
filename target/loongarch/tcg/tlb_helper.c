@@ -18,15 +18,27 @@
 #include "exec/log.h"
 #include "cpu-csr.h"
 
-static inline bool tlb_entry_matches_gid(LoongArchTLB *tlb, uint8_t gid)
+static inline bool tlb_entry_matches_gid(const LoongArchTLB *tlb, uint8_t gid)
 {
     uint8_t entry_gid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, GID);
     return entry_gid == gid;
 }
 
-static inline bool tlb_entry_matches_guest(CPULoongArchState *env, LoongArchTLB *tlb)
+/*
+ * Bank an operation targets.  It is chosen by the operation, never by the
+ * mode in which the helper happens to run: gtlbwr/gtlbfill execute in host
+ * mode yet must address the guest bank.
+ */
+static inline LoongArchTLB *tlb_bank_base(CPULoongArchState *env, bool guest)
 {
-    return tlb_entry_matches_gid(tlb, get_tgid(env));
+    return guest ? env->gtlb : env->tlb;
+}
+
+/* Entries of a bank all carry that bank's GID; anything else is a stale tag. */
+static inline bool tlb_entry_in_bank(CPULoongArchState *env,
+                                     const LoongArchTLB *tlb, bool guest)
+{
+    return tlb_entry_matches_gid(tlb, get_bank_gid(env, guest));
 }
 
 static void get_dir_base_width(CPULoongArchState *env, uint64_t *dir_base,
@@ -248,7 +260,13 @@ static void fill_tlb_entry(CPULoongArchState *env, int index, bool guest)
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 1);
     csr_asid = FIELD_EX64(guest ? env->GCSR_ASID : env->CSR_ASID, CSR_ASID, ASID);
     tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, ASID, csr_asid);
-    tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID, get_tgid(env));
+    /*
+     * The GID is a property of the bank being filled: a guest entry belongs to
+     * the guest context (gtlbwr/gtlbfill run in host mode, so get_tgid() would
+     * have tagged it with the host GID).
+     */
+    tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, GID,
+                               get_bank_gid(env, guest));
 
     tlb->tlb_entry0 = lo0;
     tlb->tlb_entry1 = lo1;
@@ -278,7 +296,8 @@ void helper_tlbsrch(CPULoongArchState *env)
     }
 
     /* Search only in TLB entries that belong to current guest context */
-    match = loongarch_tlb_search(env, search_ehi, &index, env->guest, get_tgid(env));
+    match = loongarch_tlb_search(env, search_ehi, &index, env->guest,
+                                 get_bank_gid(env, env->guest));
 
     if (match) {
         SET_CSR_IF(env->guest, TLBIDX, FIELD_DP64(GET_CSR_IF(env->guest, TLBIDX), CSR_TLBIDX, INDEX, index));
@@ -307,7 +326,8 @@ void helper_gtlbsrch(CPULoongArchState *env)
     }
 
     /* Search only in TLB entries that belong to current guest context */
-    match = loongarch_tlb_search(env, search_ehi, &index, true, get_tgid(env));
+    match = loongarch_tlb_search(env, search_ehi, &index, true,
+                                 get_bank_gid(env, true));
 
     if (match) {
         env->GCSR_TLBIDX = FIELD_DP64(env->GCSR_TLBIDX, CSR_TLBIDX, INDEX, index);
@@ -328,7 +348,7 @@ void helper_tlbrd(CPULoongArchState *env)
     tlb = env->guest ? &env->gtlb[index] : &env->tlb[index];
 
     /* Check if TLB entry belongs to current guest context */
-    if ((!tlb_entry_matches_guest(env, tlb)) && env->guest) {
+    if (env->guest && !tlb_entry_in_bank(env, tlb, true)) {
         /* Invalid TLB entry for current guest */
         SET_CSR_IF(env->guest, TLBIDX, FIELD_DP64(GET_CSR_IF(env->guest, TLBIDX), CSR_TLBIDX, NE, 1));
         SET_CSR_IF(env->guest, ASID, FIELD_DP64(GET_CSR_IF(env->guest, ASID), CSR_ASID, ASID, 0));
@@ -378,7 +398,7 @@ void helper_gtlbrd(CPULoongArchState *env)
     tlb = &env->gtlb[index];
 
     /* Check if TLB entry belongs to current guest context */
-    if (!tlb_entry_matches_guest(env, tlb)) {
+    if (!tlb_entry_in_bank(env, tlb, true)) {
         env->GCSR_TLBIDX = FIELD_DP64(env->GCSR_TLBIDX, CSR_TLBIDX, NE, 1);
         env->GCSR_ASID = FIELD_DP64(env->GCSR_ASID, CSR_ASID, ASID, 0);
         env->GCSR_TLBEHI = 0;
@@ -542,7 +562,7 @@ void helper_tlbclr(CPULoongArchState *env)
             tlb = env->guest ? &env->gtlb[i * 256 + (index % 256)] : &env->tlb[i * 256 + (index % 256)];
 
             /* Only clear entries belonging to current guest */
-            if ((!tlb_entry_matches_guest(env, tlb)) && env->guest) {
+            if (env->guest && !tlb_entry_in_bank(env, tlb, true)) {
                 continue;
             }
 
@@ -558,7 +578,7 @@ void helper_tlbclr(CPULoongArchState *env)
             tlb = env->guest ? &env->gtlb[i] : &env->tlb[i];
 
             /* Only clear entries belonging to current guest */
-            if ((!tlb_entry_matches_guest(env, tlb)) && env->guest) {
+            if (env->guest && !tlb_entry_in_bank(env, tlb, true)) {
                 continue;
             }
 
@@ -594,7 +614,7 @@ void helper_gtlbclr(CPULoongArchState *env)
             tlb = &env->gtlb[i * 256 + (index % 256)];
 
             /* Only clear entries belonging to current guest */
-            if (!tlb_entry_matches_guest(env, tlb)) {
+            if (!tlb_entry_in_bank(env, tlb, true)) {
                 continue;
             }
 
@@ -610,7 +630,7 @@ void helper_gtlbclr(CPULoongArchState *env)
             tlb = &env->gtlb[i];
 
             /* Only clear entries belonging to current guest */
-            if (!tlb_entry_matches_guest(env, tlb)) {
+            if (!tlb_entry_in_bank(env, tlb, true)) {
                 continue;
             }
 
@@ -638,7 +658,7 @@ void helper_tlbflush(CPULoongArchState *env)
             int s_idx = i * 256 + (index % 256);
             tlb = env->guest ? &env->gtlb[s_idx] : &env->tlb[s_idx];
 
-            if (tlb_entry_matches_guest(env, tlb) || env->guest == 0) {
+            if (env->guest == 0 || tlb_entry_in_bank(env, tlb, true)) {
                 tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc,
                                                       TLB_MISC, E, 0);
             }
@@ -648,7 +668,7 @@ void helper_tlbflush(CPULoongArchState *env)
         for (i = LOONGARCH_STLB; i < LOONGARCH_TLB_MAX; i++) {
             tlb = env->guest ? &env->gtlb[i] : &env->tlb[i];
             /* Only flush entries belonging to current guest */
-            if (tlb_entry_matches_guest(env, tlb) || env->guest == 0) {
+            if (env->guest == 0 || tlb_entry_in_bank(env, tlb, true)) {
                 tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc,
                                                   TLB_MISC, E, 0);
             }
@@ -677,7 +697,7 @@ void helper_gtlbflush(CPULoongArchState *env)
             tlb = &env->gtlb[s_idx];
 
             /* Only flush entries belonging to current guest */
-            if (tlb_entry_matches_guest(env, tlb)) {
+            if (tlb_entry_in_bank(env, tlb, true)) {
                 tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc,
                                                       TLB_MISC, E, 0);
             }
@@ -687,7 +707,7 @@ void helper_gtlbflush(CPULoongArchState *env)
         for (i = LOONGARCH_STLB; i < LOONGARCH_TLB_MAX; i++) {
             tlb = &env->gtlb[i];
             /* Only flush entries belonging to current guest */
-            if (tlb_entry_matches_guest(env, tlb)) {
+            if (tlb_entry_in_bank(env, tlb, true)) {
                 tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc,
                                                   TLB_MISC, E, 0);
             }
@@ -697,139 +717,258 @@ void helper_gtlbflush(CPULoongArchState *env)
     tlb_flush(env_cpu(env));
 }
 
-void helper_invtlb_all(CPULoongArchState *env, target_ulong info, uint32_t current_only, uint32_t to_guest)
+/*
+ * INVTLB scoping rules (LoongArch manual 4.2.4.7 for 0x0-0x6, LVZ for the
+ * rest):
+ *
+ *   0x0-0x6  act on the bank currently in use and are filtered by the GID of
+ *            that bank, so a host sweep can never clear guest entries.
+ *   0x9      clear the entries of the guest bank tagged with GID = rj.info[23:16]
+ *   0xa-0xe  same, further restricted to G = 1 / G = 0 / ASID / VA
+ *   0x10     clear the whole guest bank, any GID (GVA -> GPA mappings)
+ *   0x11     clear the whole host bank, any GID (GPA -> HPA mappings)
+ *   0x12     clear both banks, any GID
+ *   0x13-0x16 same three scopes as 0x10-0x12 but filtered by GID = rj.info[23:16]
+ *
+ * The bank is chosen by the opcode (and, for 0x0-0x6, by the mode in use),
+ * never by the GID an entry happens to carry: bank separation is what makes
+ * the two arrays independent.
+ */
+typedef bool (*invtlb_pred)(const LoongArchTLB *tlb, void *opaque);
+
+/* 0x9-0x16 read GTLBC/GSTAT through the host view, so they are host-only. */
+static inline bool invtlb_op_is_lvz(uint32_t op)
 {
-    if (to_guest && env->guest) {
-        do_raise_exception(env, EXCCODE_IPE, GETPC());
-    }
-
-    // if (to_guest && current_only == 0) {
-    //     do_raise_exception(env, EXCCODE_INE, GETPC());
-    // }
-
-    uint16_t gid = to_guest ? ((info >> 16) & 0xff) : get_tgid(env);
-
-    for (int i = 0; i < LOONGARCH_TLB_AND_GTLB_MAX; i++) {
-        if (current_only == 0 || tlb_entry_matches_gid(&env->tlb[i], gid)) {
-            env->tlb[i].tlb_misc = FIELD_DP64(env->tlb[i].tlb_misc,
-                                              TLB_MISC, E, 0);
-        }
-    }
-    tlb_flush(env_cpu(env));
+    return op >= 0x9 && op <= 0x16;
 }
 
-void helper_invtlb_all_g(CPULoongArchState *env, target_ulong info, uint32_t g, uint32_t to_guest)
+static void invtlb_sweep(CPULoongArchState *env, bool guest, bool gid_all,
+                         uint8_t gid, invtlb_pred pred, void *opaque)
 {
-    if (to_guest && env->guest) {
-        do_raise_exception(env, EXCCODE_IPE, GETPC());
-    }
-    uint16_t gid = to_guest ? ((info >> 16) & 0xff) : get_tgid(env);
+    LoongArchTLB *bank = tlb_bank_base(env, guest);
 
-    for (int i = 0; i < LOONGARCH_TLB_AND_GTLB_MAX; i++) {
-        LoongArchTLB *tlb = &env->tlb[i];
-        uint8_t tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
+    for (int i = 0; i < LOONGARCH_TLB_MAX; i++) {
+        LoongArchTLB *tlb = &bank[i];
 
-        if (tlb_g == g && tlb_entry_matches_gid(tlb, gid)) {
-            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 0);
-        }
-    }
-    tlb_flush(env_cpu(env));
-}
-
-void helper_invtlb_all_asid(CPULoongArchState *env, target_ulong info, uint32_t to_guest)
-{
-    if (to_guest && env->guest) {
-        do_raise_exception(env, EXCCODE_IPE, GETPC());
-    }
-    uint16_t asid = info & R_CSR_ASID_ASID_MASK;
-    uint16_t gid = to_guest ? ((info >> 16) & 0xff) : get_tgid(env);
-
-    for (int i = 0; i < LOONGARCH_TLB_AND_GTLB_MAX; i++) {
-        LoongArchTLB *tlb = &env->tlb[i];
-        uint8_t tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
-        uint16_t tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
-
-        if (!tlb_g && (tlb_asid == asid)  && tlb_entry_matches_gid(tlb, gid)) {
-            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 0);
-        }
-    }
-    tlb_flush(env_cpu(env));
-}
-
-void helper_invtlb_page_asid(CPULoongArchState *env, target_ulong info,
-                             target_ulong addr, uint32_t to_guest)
-{
-    if (to_guest && env->guest) {
-        do_raise_exception(env, EXCCODE_IPE, GETPC());
-    }
-    uint16_t asid = info & 0x3ff;
-    uint16_t gid = to_guest ? ((info >> 16) & 0xff) : get_tgid(env);
-
-    for (int i = 0; i < LOONGARCH_TLB_AND_GTLB_MAX; i++) {
-        LoongArchTLB *tlb = &env->tlb[i];
-        uint8_t tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
-        uint16_t tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
-        uint64_t vpn, tlb_vppn;
-        uint8_t tlb_ps, compare_shift;
-
-        if (!tlb_entry_matches_gid(tlb, gid)) {
+        if (!gid_all && !tlb_entry_matches_gid(tlb, gid)) {
             continue;
         }
-
-        if ((i >= LOONGARCH_STLB && i < LOONGARCH_TLB_MAX)
-            || (i >= LOONGARCH_TLB_MAX + LOONGARCH_STLB
-            && i < LOONGARCH_TLB_AND_GTLB_MAX)) {
-            tlb_ps = FIELD_EX64(tlb->tlb_misc, TLB_MISC, PS);
-        } else {
-            tlb_ps = FIELD_EX64(to_guest ? env->GCSR_STLBPS : GET_CSR_IF(env->guest, STLBPS), CSR_STLBPS, PS);
-        }
-        tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
-        vpn = (addr & TARGET_VIRT_MASK) >> (tlb_ps + 1);
-        compare_shift = tlb_ps + 1 - R_TLB_MISC_VPPN_SHIFT;
-
-        if (!tlb_g && (tlb_asid == asid) &&
-            (vpn == (tlb_vppn >> compare_shift))) {
-            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 0);
-            }
-    }
-    tlb_flush(env_cpu(env));
-}
-
-void helper_invtlb_page_asid_or_g(CPULoongArchState *env,
-                                  target_ulong info, target_ulong addr, uint32_t to_guest)
-{
-    if (to_guest && env->guest) {
-        do_raise_exception(env, EXCCODE_IPE, GETPC());
-    }
-    uint16_t asid = info & 0x3ff;
-    uint16_t gid = to_guest ? ((info >> 16) & 0xff) : get_tgid(env);
-
-    for (int i = 0; i < LOONGARCH_TLB_AND_GTLB_MAX; i++) {
-        LoongArchTLB *tlb = &env->tlb[i];
-        uint8_t tlb_g = FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
-        uint16_t tlb_asid = FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
-        uint64_t vpn, tlb_vppn;
-        uint8_t tlb_ps, compare_shift;
-
-        if (!tlb_entry_matches_gid(tlb, gid)) {
+        if (pred && !pred(tlb, opaque)) {
             continue;
         }
-
-        if ((i >= LOONGARCH_STLB && i < LOONGARCH_TLB_MAX)
-            || (i >= LOONGARCH_TLB_MAX + LOONGARCH_STLB && i < LOONGARCH_TLB_AND_GTLB_MAX)) {
-            tlb_ps = FIELD_EX64(tlb->tlb_misc, TLB_MISC, PS);
-        } else {
-            tlb_ps = FIELD_EX64(to_guest ? env->GCSR_STLBPS : GET_CSR_IF(env->guest, STLBPS), CSR_STLBPS, PS);
-        }
-        tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
-        vpn = (addr & TARGET_VIRT_MASK) >> (tlb_ps + 1);
-        compare_shift = tlb_ps + 1 - R_TLB_MISC_VPPN_SHIFT;
-
-        if ((tlb_g || (tlb_asid == asid)) &&
-            (vpn == (tlb_vppn >> compare_shift))) {
-            tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 0);
-            }
+        tlb->tlb_misc = FIELD_DP64(tlb->tlb_misc, TLB_MISC, E, 0);
     }
+}
+
+/* rj[23:16] holds the target GID of the LVZ forms, rj[9:0] the ASID. */
+static inline uint8_t invtlb_op_gid(target_ulong info)
+{
+    return (info >> 16) & 0xff;
+}
+
+static inline uint16_t invtlb_op_asid(target_ulong info)
+{
+    return info & R_CSR_ASID_ASID_MASK;
+}
+
+static inline uint8_t invtlb_entry_g(const LoongArchTLB *tlb)
+{
+    return FIELD_EX64(tlb->tlb_entry0, TLBENTRY, G);
+}
+
+static inline uint16_t invtlb_entry_asid(const LoongArchTLB *tlb)
+{
+    return FIELD_EX64(tlb->tlb_misc, TLB_MISC, ASID);
+}
+
+/* Per-entry predicates for the constrained forms. */
+typedef struct InvtlbMatch {
+    CPULoongArchState *env;
+    bool guest;
+    uint16_t asid;
+    target_ulong addr;
+    uint8_t g;
+} InvtlbMatch;
+
+static inline bool invtlb_entry_matches_va(CPULoongArchState *env,
+                                           const LoongArchTLB *tlb, int index,
+                                           bool guest, target_ulong addr)
+{
+    uint8_t tlb_ps = (index >= LOONGARCH_STLB)
+        ? FIELD_EX64(tlb->tlb_misc, TLB_MISC, PS)
+        : FIELD_EX64(GET_CSR_IF(guest, STLBPS), CSR_STLBPS, PS);
+    uint64_t tlb_vppn = FIELD_EX64(tlb->tlb_misc, TLB_MISC, VPPN);
+    uint64_t vpn;
+    int compare_shift;
+
+    /* Same convention as loongarch_tlb_search(). */
+    if (tlb_ps >= 48) {
+        return false;
+    }
+    compare_shift = (int)tlb_ps + 1 - R_TLB_MISC_VPPN_SHIFT;
+    if (compare_shift < 0) {
+        return false;
+    }
+    vpn = (addr & TARGET_VIRT_MASK) >> (tlb_ps + 1);
+    return vpn == (tlb_vppn >> compare_shift);
+}
+
+static bool invtlb_pred_page_asid(const LoongArchTLB *tlb, void *opaque)
+{
+    InvtlbMatch *m = opaque;
+    int index = tlb - tlb_bank_base(m->env, m->guest);
+
+    return !invtlb_entry_g(tlb)
+        && invtlb_entry_asid(tlb) == m->asid
+        && invtlb_entry_matches_va(m->env, tlb, index, m->guest, m->addr);
+}
+
+static bool invtlb_pred_page_asid_or_g(const LoongArchTLB *tlb, void *opaque)
+{
+    InvtlbMatch *m = opaque;
+    int index = tlb - tlb_bank_base(m->env, m->guest);
+
+    return (invtlb_entry_g(tlb) || invtlb_entry_asid(tlb) == m->asid)
+        && invtlb_entry_matches_va(m->env, tlb, index, m->guest, m->addr);
+}
+
+static bool invtlb_pred_page(const LoongArchTLB *tlb, void *opaque)
+{
+    InvtlbMatch *m = opaque;
+    int index = tlb - tlb_bank_base(m->env, m->guest);
+
+    return invtlb_entry_matches_va(m->env, tlb, index, m->guest, m->addr);
+}
+
+static bool invtlb_pred_asid(const LoongArchTLB *tlb, void *opaque)
+{
+    InvtlbMatch *m = opaque;
+
+    return !invtlb_entry_g(tlb) && invtlb_entry_asid(tlb) == m->asid;
+}
+
+static bool invtlb_pred_global(const LoongArchTLB *tlb, void *opaque)
+{
+    InvtlbMatch *m = opaque;
+
+    return invtlb_entry_g(tlb) == m->g;
+}
+
+void helper_invtlb(CPULoongArchState *env, target_ulong info,
+                   target_ulong addr, uint32_t op)
+{
+    InvtlbMatch m = { .env = env, .addr = addr };
+    invtlb_pred pred = NULL;
+    bool guest, gid_all;
+    uint8_t gid = 0;
+
+    if (invtlb_op_is_lvz(op) && env->guest) {
+        do_raise_exception(env, EXCCODE_IPE, GETPC());
+    }
+
+    /* Bank currently in use, for the base forms. */
+    guest = env->guest;
+
+    switch (op) {
+    case 0x0: /* every entry of the current bank, any GID */
+        gid_all = true;
+        break;
+    case 0x1:
+        /*
+         * "Invalidate current": the same bank, restricted to the GID that
+         * owns it.  The no-LVZ manual calls 0x0 and 0x1 identical because
+         * there is only one GID then; with LVZ they must differ, or a guest
+         * could evict another guest's mappings -- Linux names 0x1
+         * INVTLB_CURRENT_ALL and KVM uses it to flush only its own VM.
+         */
+        gid = get_bank_gid(env, guest);
+        gid_all = false;
+        break;
+    case 0x2:
+    case 0x3: /* G = 1 / G = 0 */
+        gid = get_bank_gid(env, guest);
+        m.g = (op == 0x2);
+        pred = invtlb_pred_global;
+        gid_all = false;
+        break;
+    case 0x4: /* G = 0 and ASID match */
+        gid = get_bank_gid(env, guest);
+        m.asid = invtlb_op_asid(info);
+        pred = invtlb_pred_asid;
+        gid_all = false;
+        break;
+    case 0x5: /* G = 0, ASID and VA match */
+        gid = get_bank_gid(env, guest);
+        m.guest = guest;
+        m.asid = invtlb_op_asid(info);
+        pred = invtlb_pred_page_asid;
+        gid_all = false;
+        break;
+    case 0x6: /* G = 1 or ASID match, and VA match */
+        gid = get_bank_gid(env, guest);
+        m.guest = guest;
+        m.asid = invtlb_op_asid(info);
+        pred = invtlb_pred_page_asid_or_g;
+        gid_all = false;
+        break;
+    case 0x9: /* guest bank, GID from rj */
+    case 0xa: /* guest bank, GID from rj, G = 1 */
+    case 0xb: /* guest bank, GID from rj, G = 0 */
+    case 0xc: /* guest bank, GID from rj, G = 0 and ASID match */
+    case 0xd: /* guest, G = 0, ASID and VA match */
+    case 0xe: /* guest, G = 1 or ASID match, and VA match */
+        guest = true;
+        gid = invtlb_op_gid(info);
+        gid_all = false;
+        if (op == 0xa || op == 0xb) {
+            m.g = (op == 0xa);
+            pred = invtlb_pred_global;
+        } else if (op == 0xc) {
+            m.asid = invtlb_op_asid(info);
+            pred = invtlb_pred_asid;
+        } else if (op == 0xd || op == 0xe) {
+            m.guest = guest;
+            m.asid = invtlb_op_asid(info);
+            pred = (op == 0xd) ? invtlb_pred_page_asid
+                               : invtlb_pred_page_asid_or_g;
+        }
+        break;
+    case 0x10: /* guest bank, every GID: GVA -> GPA */
+    case 0x13: /* guest bank, GID from rj: GVA -> GPA */
+        guest = true;
+        gid = invtlb_op_gid(info);
+        gid_all = (op == 0x10);
+        break;
+    case 0x11: /* host bank, every GID: GPA -> HPA */
+    case 0x14: /* host bank, GID from rj: GPA -> HPA */
+        guest = false;
+        gid = invtlb_op_gid(info);
+        gid_all = (op == 0x11);
+        break;
+    case 0x12: /* both banks, every GID */
+    case 0x15: /* both banks, GID from rj */
+        gid = invtlb_op_gid(info);
+        gid_all = (op == 0x12);
+        invtlb_sweep(env, false, gid_all, gid, NULL, NULL);
+        invtlb_sweep(env, true, gid_all, gid, NULL, NULL);
+        tlb_flush(env_cpu(env));
+        return;
+    case 0x16: /* host bank, GID from rj, address match */
+        guest = false;
+        gid = invtlb_op_gid(info);
+        m.guest = guest;
+        m.asid = invtlb_op_asid(info);
+        pred = invtlb_pred_page;
+        gid_all = false;
+        break;
+    default:
+        /* Values absent from the manual raise RI; trans_invtlb rejects the
+         * ones illegal without LVZ before we get here. */
+        do_raise_exception(env, EXCCODE_INE, GETPC());
+        return;
+    }
+
+    invtlb_sweep(env, guest, gid_all, gid, pred, pred ? &m : NULL);
     tlb_flush(env_cpu(env));
 }
 
