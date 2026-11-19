@@ -547,12 +547,24 @@ LBT_MIPS_ST(lbt_str_w, lbt_mips_str, 4)
 LBT_MIPS_ST(lbt_stl_d, lbt_mips_stl, 8)
 LBT_MIPS_ST(lbt_str_d, lbt_mips_str, 8)
 
+/*
+ * jiscr0/jiscr1 set cpu_pc from the helper and continue there.
+ *
+ * DISAS_NORETURN alone tells the translator that control does not fall
+ * through, but it does not emit a branch: the block then ends at whatever the
+ * generic epilogue does.  Without a dispatch the generated code arrives at the
+ * TB-exit label with cpu_pc already changed and no exit reason set, and
+ * cpu_loop_exec_tb() asserts on icount_enabled() because the only way to leave
+ * a TB like that is the icount path.  Look the target up and jump to it, the
+ * way jirl does with its computed address.
+ */
 static bool trans_lbt_jiscr0(DisasContext *ctx, arg_lbt_imm *a)
 {
     if (!avail_LBT_ANY(ctx)) { return false; }
     gen_helper_lbt_jiscr(cpu_pc, tcg_env, tcg_constant_i32(a->imm),
                          tcg_constant_i32(0),
                          tcg_constant_i64(ctx->base.pc_next));
+    tcg_gen_lookup_and_goto_ptr();
     ctx->base.is_jmp = DISAS_NORETURN;
     return true;
 }
@@ -563,6 +575,7 @@ static bool trans_lbt_jiscr1(DisasContext *ctx, arg_lbt_imm *a)
     gen_helper_lbt_jiscr(cpu_pc, tcg_env, tcg_constant_i32(a->imm),
                          tcg_constant_i32(1),
                          tcg_constant_i64(ctx->base.pc_next));
+    tcg_gen_lookup_and_goto_ptr();
     ctx->base.is_jmp = DISAS_NORETURN;
     return true;
 }
